@@ -1,0 +1,37 @@
+name: SMTP Email Verifier
+
+on:
+  workflow_dispatch:
+    inputs:
+      emails:
+        description: 'Emails to verify (comma separated)'
+        required: true
+        type: string
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install dnspython
+
+      - name: Run SMTP verification
+        run: |
+          # Convert comma-separated to space-separated args
+          EMAILS="${{ github.event.inputs.emails }}"
+          python api/verify.py $(echo "$EMAILS" | tr ',' ' ') > result.json
+          cat result.json
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: smtp-result
+          path: result.json
+          retention-days: 1
