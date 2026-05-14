@@ -7,6 +7,14 @@ on:
         description: 'Emails to verify (comma separated)'
         required: true
         type: string
+      run_id:
+        description: 'Unique run ID to match results'
+        required: false
+        type: string
+      label:
+        description: 'Label for this batch (e.g. person name or company)'
+        required: false
+        type: string
 
 jobs:
   verify:
@@ -24,14 +32,82 @@ jobs:
 
       - name: Run SMTP verification
         run: |
-          # Convert comma-separated to space-separated args
           EMAILS="${{ github.event.inputs.emails }}"
-          python api/verify.py $(echo "$EMAILS" | tr ',' ' ') > result.json
-          cat result.json
+          LABEL="${{ github.event.inputs.label }}"
+          RUN_ID="${{ github.event.inputs.run_id }}"
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 
-      - name: Upload result
+          # Build folder name: timestamp + label
+          FOLDER_NAME="${TIMESTAMP}"
+          if [ -n "$LABEL" ]; then
+            CLEAN_LABEL=$(echo "$LABEL" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+            FOLDER_NAME="${TIMESTAMP}_${CLEAN_LABEL}"
+          fi
+
+          mkdir -p "results/${FOLDER_NAME}"
+          echo "Folder: results/${FOLDER_NAME}"
+
+          # Run verification
+          python api/verify.py $(echo "$EMAILS" | tr ',' ' ') > "results/${FOLDER_NAME}/result.json"
+          cat "results/${FOLDER_NAME}/result.json"
+
+          # Generate summary + valid_only
+          python3 - <<PYEOF
+import json
+
+with open("results/${FOLDER_NAME}/result.json") as f:
+    data = json.load(f)
+
+total     = len(data)
+delivered = sum(1 for r in data if r.get("deliverable") is True)
+invalid   = sum(1 for r in data if r.get("deliverable") is False)
+uncertain = sum(1 for r in data if r.get("deliverable") is None)
+
+lines = [
+    "=" * 50,
+    "  SMTP Verification Summary",
+    "  Label    : ${LABEL:-unlabeled}",
+    "  Time     : ${TIMESTAMP}",
+    "=" * 50,
+    f"  Total    : {total}",
+    f"  Valid    : {delivered}",
+    f"  Invalid  : {invalid}",
+    f"  Uncertain: {uncertain}",
+    "=" * 50, "",
+]
+
+for r in data:
+    icon = "OK" if r.get("deliverable") is True else "FAIL" if r.get("deliverable") is False else "UNCERTAIN"
+    lines.append(f"[{icon}]  {r['email']}")
+    lines.append(f"        SMTP {r.get('smtp_code')}  {str(r.get('smtp_message',''))[:70]}")
+    lines.append(f"        MX  : {r.get('mx_used','n/a')}")
+    if r.get("error"):
+        lines.append(f"        Err : {r['error']}")
+    lines.append("")
+
+with open("results/${FOLDER_NAME}/summary.txt", "w") as f:
+    f.write("\n".join(lines))
+
+valid = [r for r in data if r.get("deliverable") is True]
+with open("results/${FOLDER_NAME}/valid_only.json", "w") as f:
+    json.dump(valid, f, indent=2)
+
+print("\n".join(lines))
+PYEOF
+
+      - name: Show folder structure
+        run: find results/ -type f | sort
+
+      - name: Upload full results
         uses: actions/upload-artifact@v4
         with:
-          name: smtp-result
-          path: result.json
-          retention-days: 1
+          name: smtp-result-${{ github.event.inputs.run_id || github.run_id }}
+          path: results/
+          retention-days: 7
+
+      - name: Upload valid emails only
+        uses: actions/upload-artifact@v4
+        with:
+          name: valid-emails-${{ github.event.inputs.run_id || github.run_id }}
+          path: results/**/valid_only.json
+          retention-days: 7
